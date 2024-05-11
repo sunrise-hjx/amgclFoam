@@ -332,7 +332,7 @@ void Foam::amgclSolver::buildMat
             {
                 interfaces[patchi].initInternalFieldTransfer
                 (
-                    Pstream::commsTypes::nonblocking,
+                    Pstream::commsTypes::blocking,
                     globalCells
                 );
             }
@@ -351,7 +351,7 @@ void Foam::amgclSolver::buildMat
                 (
                     interfaces[patchi].internalFieldTransfer
                     (
-                        Pstream::commsTypes::nonblocking,
+                        Pstream::commsTypes::blocking,
                         globalCells
                     )
                 );
@@ -517,16 +517,16 @@ void Foam::amgclSolver::updateMat
             {
                 interfaces[patchi].initInternalFieldTransfer
                 (
-                    Pstream::commsTypes::nonblocking,
+                    Pstream::commsTypes::blocking,
                     globalCells
                 );
             }
         }
 
-        // if (Pstream::parRun())
-        // {
-        //     Pstream::waitRequests();
-        // }
+        if (Pstream::parRun())
+        {
+            Pstream::waitRequests();
+        }
 
         forAll(interfaces, patchi)
         {
@@ -544,7 +544,7 @@ void Foam::amgclSolver::updateMat
                 (
                     interfaces[patchi].internalFieldTransfer
                     (
-                        Pstream::commsTypes::nonblocking,
+                        Pstream::commsTypes::blocking, // nonBlocking
                         globalCells
                     )
                 );
