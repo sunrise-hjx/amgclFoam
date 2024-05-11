@@ -544,7 +544,7 @@ void Foam::amgclSolver::updateMat
                 (
                     interfaces[patchi].internalFieldTransfer
                     (
-                        Pstream::commsTypes::nonblocking, // nonnonblocking
+                        Pstream::commsTypes::nonblocking,
                         globalCells
                     )
                 );
