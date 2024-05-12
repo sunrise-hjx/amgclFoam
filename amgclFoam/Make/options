@@ -1,17 +1,16 @@
 EXE_INC = \
-    $(PFLAGS) $(PINC) \
-    -Wno-old-style-cast \
     -I$(LIB_SRC)/finiteVolume/lnInclude \
     -I$(LIB_SRC)/fileFormats/lnInclude \
     -I$(LIB_SRC)/surfMesh/lnInclude \
     -I$(LIB_SRC)/meshTools/lnInclude \
     -I$(LIB_SRC)/Pstream/mpi/lnInclude \
-    -I$(HOME)/OpenFOAM/ThirdParty-v1912/openmpi-install/include \
-    -I$(HOME)/amgcl-master
+    -I$(MPI_ROOT)/include \
+    -I../_LIB_/amgcl \
+    -I../_LIB_/boost
 
 LIB_LIBS = \
     -lfiniteVolume \
-    -L$(HOME)/OpenFOAM/ThirdParty-v1912/openmpi-install/lib -lmpi \
+    -L$(MPI_ROOT)/lib -lmpi \
     -lfileFormats \
     -lsurfMesh \
     -lmeshTools
