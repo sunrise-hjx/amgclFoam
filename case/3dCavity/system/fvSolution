@@ -1,0 +1,236 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  5                                     |
+|   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    U
+    {
+
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-08;
+        relTol          1e-03;
+
+        // solver          GAMG;
+        // tolerance       1e-06;
+        // relTol          0.01;
+        // smoother        GaussSeidel;
+        // nPreSweeps      2;
+        // nPostSweeps     2;
+        // nFinestSweeps   2;
+        // cacheAgglomeration false;
+        // nCellsInCoarsestLevel 10;
+        // agglomerator    faceAreaPair;
+        // mergeLevels     1;
+    }
+
+    pCorr
+    {
+        solver          GAMG;
+        tolerance       1e-08;
+        relTol          0.01;
+        smoother        GaussSeidel;
+        nPreSweeps      0;
+        nPostSweeps     2;
+        nFinestSweeps   2;
+        cacheAgglomeration false;
+        nCellsInCoarsestLevel 10;
+        agglomerator    faceAreaPair;
+        mergeLevels     1;
+    }
+
+    pCorrFinal
+    {
+        solver          PCG;
+        preconditioner
+        {
+            preconditioner  GAMG;
+            tolerance       1e-15;
+            relTol          0.01;
+            nVcycles        2;
+            smoother        GaussSeidel;
+            nPreSweeps      0;
+            nPostSweeps     2;
+            nFinestSweeps   2;
+            cacheAgglomeration false;
+            nCellsInCoarsestLevel 10;
+            agglomerator    faceAreaPair;
+            mergeLevels     1;
+        }
+
+        tolerance       1e-15;
+        relTol          0;
+        maxIter         20;
+    }
+
+    // p
+    // {
+    //     solver          GAMG;
+    //     tolerance       1e-08;
+    //     relTol          0.01;
+    //     smoother        GaussSeidel;
+    //     nPreSweeps      0;
+    //     nPostSweeps     2;
+    //     nFinestSweeps   2;
+    //     cacheAgglomeration false;
+    //     nCellsInCoarsestLevel 10;
+    //     agglomerator    faceAreaPair;
+    //     mergeLevels     1;
+    // }
+
+    // p
+    // {
+    //     solver amgclMPI;
+    //     amgclMPI
+    //     {
+    //         options
+    //         {
+    //             // check_after false;
+    //             ns_search true;
+    //             maxiter 100;
+    //         }
+    //         caching
+    //         {
+    //             matrix
+    //             {
+    //                 //update always;
+    //                 update periodic;
+    //                 periodicCoeffs
+    //                 {
+    //                     frequency 3;
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     tolerance       0;
+    //     relTol          1e-6;
+    // }
+
+    // pFinal
+    // {
+    //     solver amgclMPI;
+    //     amgclMPI
+    //     {
+    //         options
+    //         {
+    //             // check_after false;
+    //             ns_search true;
+    //             maxiter 100;
+    //         }
+    //         caching
+    //         {
+    //             matrix
+    //             {
+    //                 //update always;
+    //                 update periodic;
+    //                 periodicCoeffs
+    //                 {
+    //                     frequency 1;
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     tolerance       0;
+    //     relTol          1e-15;
+    // }
+
+    pFinal
+    {
+        solver amgcl;
+        amgcl
+        {
+            options
+            {
+                // check_after false;
+                ns_search true;
+                maxiter 100;
+            }
+            caching
+            {
+                matrix
+                {
+                    //update always;
+                    update periodic;
+                    periodicCoeffs
+                    {
+                        frequency 1;
+                    }
+                }
+            }
+        }
+        tolerance       0;
+        relTol          1e-15;
+    }
+
+    // pFinal
+    // {
+    //     solver          PBiCGStab;
+    //     preconditioner
+    //     {
+    //         preconditioner  GAMG;
+    //         tolerance       1e-15;
+    //         relTol          0.01;
+    //         nVcycles        2;
+    //         smoother        GaussSeidel;
+    //         nPreSweeps      0;
+    //         nPostSweeps     2;
+    //         nFinestSweeps   2;
+    //         cacheAgglomeration false;
+    //         nCellsInCoarsestLevel 10;
+    //         agglomerator    faceAreaPair;
+    //         mergeLevels     1;
+    //     }
+
+    //     tolerance       0;
+    //     relTol          1e-15;
+    //     maxIter         100;
+    // }
+}
+
+SIMPLE
+{
+    nNonOrthogonalCorrectors 4;
+    residualControl
+    {
+        p    1e-10;
+    }
+    pRefCell        0;
+    pRefValue       0;
+}
+
+PISO
+{
+    momentumPredictor        yes;
+    nCorrectors     1;
+    nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
+}
+
+relaxationFactors
+{
+    fields
+    {
+        p               1.0;
+    }
+    equations
+    {
+        U               1.0;
+    }
+}
+
+// ************************************************************************* //
