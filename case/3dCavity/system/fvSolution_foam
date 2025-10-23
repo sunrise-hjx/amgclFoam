@@ -19,96 +19,62 @@ solvers
 {
     U
     {
-        solver          amgcl;
+
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
         tolerance       1e-08;
         relTol          1e-03;
-        
-        amgcl
-        {
-            options
-            {
-                solver      bicgstab;    // 非对称矩阵求解器
-                relaxation  spai0;       // 预条件器
-                coarsening  smoothed_aggregation;
-                maxiter     100;
-                ns_search   true;        // BiCGStab 空值搜索
-            }
-            
-            caching
-            {
-                matrix
-                {
-                    update  always;      // 速度场每次更新
-                }
-            }
-        }
+
+        // solver          GAMG;
+        // tolerance       1e-06;
+        // relTol          0.01;
+        // smoother        GaussSeidel;
+        // nPreSweeps      2;
+        // nPostSweeps     2;
+        // nFinestSweeps   2;
+        // cacheAgglomeration false;
+        // nCellsInCoarsestLevel 10;
+        // agglomerator    faceAreaPair;
+        // mergeLevels     1;
     }
 
     pCorr
     {
-        solver          amgcl;
+        solver          GAMG;
         tolerance       1e-08;
         relTol          0.01;
-        
-        amgcl
-        {
-            options
-            {
-                solver      cg;          // 对称矩阵用 CG
-                relaxation  spai0;
-                coarsening  smoothed_aggregation;
-                maxiter     100;
-            }
-            
-            caching
-            {
-                matrix
-                {
-                    update  periodic;
-                    periodicCoeffs
-                    {
-                        frequency 1;
-                    }
-                }
-            }
-        }
+        smoother        GaussSeidel;
+        nPreSweeps      0;
+        nPostSweeps     2;
+        nFinestSweeps   2;
+        cacheAgglomeration false;
+        nCellsInCoarsestLevel 10;
+        agglomerator    faceAreaPair;
+        mergeLevels     1;
     }
 
     pCorrFinal
     {
-        solver          amgcl;
+        solver          PCG;
+        preconditioner
+        {
+            preconditioner  GAMG;
+            tolerance       1e-15;
+            relTol          0.01;
+            nVcycles        2;
+            smoother        GaussSeidel;
+            nPreSweeps      0;
+            nPostSweeps     2;
+            nFinestSweeps   2;
+            cacheAgglomeration false;
+            nCellsInCoarsestLevel 10;
+            agglomerator    faceAreaPair;
+            mergeLevels     1;
+        }
+
         tolerance       1e-15;
         relTol          0;
-        
-        amgcl
-        {
-            options
-            {
-                solver      cg;          // 压力校正用 CG
-                relaxation  spai0;
-                coarsening  smoothed_aggregation;
-                maxiter     100;
-                
-                // AMG 参数调优
-                amg
-                {
-                    eps_strong  0.0;
-                    over_interp 1.5;
-                }
-            }
-            
-            caching
-            {
-                matrix
-                {
-                    update  periodic;
-                    periodicCoeffs
-                    {
-                        frequency 1;
-                    }
-                }
-            }
-        }
+        maxIter         20;
     }
 
     // p
@@ -184,39 +150,26 @@ solvers
 
     pFinal
     {
-        solver          amgcl;
-        tolerance       0;
-        relTol          1e-15;
-        
-        amgcl
+        solver          PCG;
+        preconditioner
         {
-            options
-            {
-                solver      cg;          // 最终压力求解用 CG (对称)
-                relaxation  spai0;       // SPAI0 预条件器
-                coarsening  smoothed_aggregation;
-                maxiter     100;
-                
-                // AMG 粗化参数
-                amg
-                {
-                    eps_strong  0.0;     // 强连接阈值
-                    over_interp 1.5;     // 过插值系数
-                }
-            }
-            
-            caching
-            {
-                matrix
-                {
-                    update  periodic;    // 周期性更新矩阵
-                    periodicCoeffs
-                    {
-                        frequency 1;     // 每次迭代更新
-                    }
-                }
-            }
+            preconditioner  GAMG;
+            tolerance       1e-15;
+            relTol          0.01;
+            nVcycles        2;
+            smoother        GaussSeidel;
+            nPreSweeps      0;
+            nPostSweeps     2;
+            nFinestSweeps   2;
+            cacheAgglomeration false;
+            nCellsInCoarsestLevel 10;
+            agglomerator    faceAreaPair;
+            mergeLevels     1;
         }
+
+        tolerance       1e-15;
+        relTol          0;
+        maxIter         20;
     }
 
     // pFinal

@@ -126,7 +126,7 @@ class amgclSolver:public lduMatrix::solver
 public:
 
     //- Runtime type information
-    TypeName("amgclMPI");
+    TypeName("amgcl");
 
     // Constructors
 

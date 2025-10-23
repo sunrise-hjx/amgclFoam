@@ -4,4 +4,4 @@ amgcl/amgclControls.C
 amgcl/amgclLinearSolverContexts.C
 amgcl/amgclCacheManager.C
 
-LIB = $(FOAM_LIBBIN)/libamgclFoam
+LIB = $(HUNTERFOAM_LIB)/libamgclFoam

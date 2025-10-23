@@ -3,17 +3,22 @@ cd ${0%/*} || exit 1                        # Run from this directory
 . $WM_PROJECT_DIR/bin/tools/RunFunctions    # Tutorial run functions
 
 rm -rf 0
+rm -rf log*
+rm -rf pro*
 touch 1.foam
-cp -r 0wall 0
+cp -r 0.orig 0
 
 # runApplication blockMesh
 # runApplication pisoFoam
 
 runApplication blockMesh
 
-# runApplication decomposePar
-# runParallel pisoFoam
+# parallel execution
+runApplication decomposePar
+runParallel pisoFoam
+runApplication reconstructPar
 
-runApplication pisoFoam
+# serial execution
+# runApplication pisoFoam
 
 #------------------------------------------------------------------------------

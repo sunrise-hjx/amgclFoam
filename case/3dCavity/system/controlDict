@@ -23,13 +23,13 @@ startTime       0;
 
 stopAt          endTime;
 
-endTime         1; // 2
+endTime         0.2; // 2
 
 deltaT          0.001;
 
 writeControl    adjustableRunTime;
 
-writeInterval   0.2;
+writeInterval   0.12;
 
 purgeWrite      0;
 
@@ -53,8 +53,8 @@ maxDeltaT       5;
 
 libs            
 (
-    "libamgclMPIFoam.so"
-    "libamgclFoam.so"
+    // "libamgclMPIFoam.so"
+    "${HUNTERFOAM_LIB}/libamgclFoam.so"
 );
 
 // ************************************************************************* //

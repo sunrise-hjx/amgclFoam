@@ -30,27 +30,45 @@ License
 #include <vector>
 #include <amgcl/backend/builtin.hpp>
 #include <amgcl/adapter/crs_tuple.hpp>
-#include <amgcl/make_block_solver.hpp>
 #include <amgcl/make_solver.hpp>
 #include <amgcl/amg.hpp>
+
+// Serial coarsening
 #include <amgcl/coarsening/smoothed_aggregation.hpp>
 #include <amgcl/coarsening/aggregation.hpp>
+#include <amgcl/coarsening/ruge_stuben.hpp>
+
+// Serial relaxation
 #include <amgcl/relaxation/spai0.hpp>
+#include <amgcl/relaxation/spai1.hpp>
+#include <amgcl/relaxation/ilu0.hpp>
 #include <amgcl/relaxation/iluk.hpp>
 #include <amgcl/relaxation/ilut.hpp>
-#include <amgcl/relaxation/as_preconditioner.hpp>
-#include <amgcl/solver/bicgstab.hpp>
-#include <amgcl/solver/idrs.hpp>
-#include <amgcl/solver/preonly.hpp>
-#include <amgcl/io/mm.hpp>
-#include <amgcl/profiler.hpp>
+#include <amgcl/relaxation/damped_jacobi.hpp>
+#include <amgcl/relaxation/gauss_seidel.hpp>
 
+// Serial solvers
+#include <amgcl/solver/cg.hpp>
+#include <amgcl/solver/bicgstab.hpp>
+#include <amgcl/solver/bicgstabl.hpp>
+#include <amgcl/solver/gmres.hpp>
+#include <amgcl/solver/fgmres.hpp>
+#include <amgcl/solver/lgmres.hpp>
+#include <amgcl/solver/idrs.hpp>
+
+// MPI support
 #include <amgcl/mpi/distributed_matrix.hpp>
 #include <amgcl/mpi/make_solver.hpp>
 #include <amgcl/mpi/amg.hpp>
 #include <amgcl/mpi/coarsening/smoothed_aggregation.hpp>
 #include <amgcl/mpi/relaxation/spai0.hpp>
+#include <amgcl/mpi/relaxation/spai1.hpp>
+#include <amgcl/mpi/solver/cg.hpp>
 #include <amgcl/mpi/solver/bicgstab.hpp>
+#include <amgcl/mpi/solver/bicgstabl.hpp>
+#include <amgcl/mpi/solver/gmres.hpp>
+
+#include <amgcl/profiler.hpp>
 
 #include "fvMesh.H"
 #include "fvMatrices.H"
@@ -85,6 +103,88 @@ namespace Foam
 }
 
 
+// * * * * * * * * * * * * * * * Helper Functions * * * * * * * * * * * * * //
+
+namespace
+{
+    // Base template - only set common parameters
+    template<typename Params>
+    void setAMGCLParametersBase
+    (
+        Params& prm,
+        const Foam::dictionary& dict,
+        const Foam::solveScalar& relTol,
+        const Foam::solveScalar& absTol
+    )
+    {
+        using namespace Foam;
+        
+        // Basic solver parameters (all solvers have these)
+        prm.solver.tol = relTol;
+        prm.solver.abstol = absTol;
+        prm.solver.maxiter = dict.getOrDefault<label>("maxiter", 100);
+        
+        // AMG coarsening parameters (if available)
+        dictionary amgDict = dict.subOrEmptyDict("amg");
+        if (amgDict.found("eps_strong"))
+        {
+            prm.precond.coarsening.aggr.eps_strong = amgDict.get<scalar>("eps_strong");
+        }
+    }
+    
+    // Specializations for different solvers with M parameter (GMRES, FGMRES)
+    template<typename Backend>
+    void setSolverM(amgcl::solver::gmres<Backend>& solver, const Foam::dictionary& dict)
+    {
+        if (dict.found("M"))
+        {
+            solver.M = dict.get<Foam::label>("M");
+        }
+    }
+    
+    template<typename Backend>
+    void setSolverM(amgcl::solver::fgmres<Backend>& solver, const Foam::dictionary& dict)
+    {
+        if (dict.found("M"))
+        {
+            solver.M = dict.get<Foam::label>("M");
+        }
+    }
+    
+    // For solvers without M parameter - do nothing
+    template<typename Solver>
+    void setSolverM(Solver&, const Foam::dictionary&) {}
+    
+    // Specializations for BiCGStab(L) with L parameter
+    template<typename Backend>
+    void setSolverL(amgcl::solver::bicgstabl<Backend>& solver, const Foam::dictionary& dict)
+    {
+        if (dict.found("L"))
+        {
+            solver.L = dict.get<Foam::label>("L");
+        }
+    }
+    
+    // For solvers without L parameter - do nothing
+    template<typename Solver>
+    void setSolverL(Solver&, const Foam::dictionary&) {}
+    
+    // For BiCGStab with ns_search
+    template<typename Backend>
+    void setSolverNsSearch(amgcl::solver::bicgstab<Backend>& solver, const Foam::dictionary& dict)
+    {
+        if (dict.found("ns_search"))
+        {
+            solver.ns_search = dict.get<bool>("ns_search");
+        }
+    }
+    
+    // For solvers without ns_search - do nothing
+    template<typename Solver>
+    void setSolverNsSearch(Solver&, const Foam::dictionary&) {}
+}
+
+
 // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
 
 Foam::amgclSolver::amgclSolver
@@ -106,7 +206,7 @@ Foam::amgclSolver::amgclSolver
         interfaces,
         solverControls
     ),
-    amgclDict_(solverControls.subDict("amgclMPI")),
+    amgclDict_(solverControls.subDict("amgcl")),
     eqName_(fieldName),
     prefix_("eqn_" + eqName_ + "_")
 {}
@@ -121,8 +221,8 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
     const direction cmpt
 ) const
 {
-    amgcl::mpi::init mpi();
-    amgcl::mpi::communicator AMGCLworld(MPI_COMM_WORLD);
+    // Check if running in parallel
+    const bool parallel = Pstream::parRun();
     
     const label nPro = Pstream::nProcs();
     const label myProNo = Pstream::myProcNo();
@@ -199,53 +299,262 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
 
     typedef amgcl::backend::builtin<double> DBackend;
     typedef amgcl::backend::builtin<double> FBackend;
-    typedef amgcl::mpi::make_solver<
-        amgcl::mpi::amg<
-            FBackend,
-            amgcl::mpi::coarsening::smoothed_aggregation<FBackend>,
-            amgcl::mpi::relaxation::spai0<FBackend>
-            >,
-        amgcl::mpi::solver::bicgstab<DBackend>
-        > Solver;
-
-    labelList &ltg = ctx.ltg_;
-    Solver::params prm;
-    prm.solver.tol = relTol_;
-    prm.solver.abstol = tolerance_;
-    // prm.solver.check_after = amgclDictOptions.getOrDefault<bool>("check_after", false);
-    prm.solver.ns_search = amgclDictOptions.getOrDefault<bool>("ns_search", true);
-    prm.solver.maxiter = amgclDictOptions.getOrDefault<label>("maxiter", 100);
 
     if(ctx.caching.needsMatrixUpdate())
     {
         Info << "Update Matrix for: " << eqName_ << "; " << nl;
+        labelList &ltg = ctx.ltg_;
         updateMat(ptrs, cols, vals, rhss, AMGxs, fvm, source, ltg, paraStartNum,proNeiPatch);
     }
     forAll(psi,ri)
     {
         rhss[ri] = source[ri];
     }
-    auto Acl = std::make_shared<amgcl::mpi::distributed_matrix<DBackend>>(AMGCLworld, std::tie(An, ptrs, cols, vals));
-    Solver AMGsolve(AMGCLworld, Acl, prm);
+
+    // Calculate initial residual using OpenFOAM standard method
+    solveScalarField Apsi(psi.size());
+    solveScalarField temp(psi.size());
+    
+    matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
+    temp = source - Apsi;
+    
+    solveScalar normFactor = this->normFactor(psi, source, Apsi, temp);
+    ctx.normFactor = normFactor;
+    
+    solveScalar initialResidual = gSumMag(temp, matrix_.mesh().comm()) / normFactor;
+    
     size_t AMGiters;
     doubleScalar &AMGerror = ctx.error;
+    ctx.performance.initialResidual() = initialResidual;
 
-    // amgcl::backend::residual(rhss, *Acl, AMGxs, AMGrs);
-    // ctx.performance.initialResidual() = std::sqrt(amgcl::backend::inner_product(AMGrs, AMGrs));
-    ctx.performance.initialResidual() = 1.0;
+    // Get solver type from dictionary
+    word solverType = amgclDictOptions.getOrDefault<word>("solver", "bicgstab");
+    word coarseningType = amgclDictOptions.getOrDefault<word>("coarsening", "smoothed_aggregation");
+    word relaxationType = amgclDictOptions.getOrDefault<word>("relaxation", "spai0");
+    
+    // Print solver configuration
+    if (firsttimein)
+    {
+        Info<< "AMGCL Solver Configuration for " << eqName_ << ":" << nl
+            << "  Solver: " << solverType << nl
+            << "  Coarsening: " << coarseningType << nl
+            << "  Relaxation: " << relaxationType << nl
+            << "  Parallel: " << (parallel ? "Yes" : "No") << nl;
+    }
 
-    std::tie(AMGiters, AMGerror) = AMGsolve(*Acl, rhss, AMGxs);
+    if (parallel)
+    {
+        // Parallel solver using MPI
+        amgcl::mpi::init mpi();
+        amgcl::mpi::communicator AMGCLworld(MPI_COMM_WORLD);
+        
+        auto Acl = std::make_shared<amgcl::mpi::distributed_matrix<DBackend>>(
+            AMGCLworld, std::tie(An, ptrs, cols, vals)
+        );
+        
+        // Select solver type for parallel
+        if (solverType == "cg")
+        {
+            typedef amgcl::mpi::make_solver<
+                amgcl::mpi::amg<FBackend, 
+                    amgcl::mpi::coarsening::smoothed_aggregation<FBackend>,
+                    amgcl::mpi::relaxation::spai0<FBackend>>,
+                amgcl::mpi::solver::cg<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            Solver AMGsolve(AMGCLworld, Acl, prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(*Acl, rhss, AMGxs);
+        }
+        else if (solverType == "gmres")
+        {
+            typedef amgcl::mpi::make_solver<
+                amgcl::mpi::amg<FBackend,
+                    amgcl::mpi::coarsening::smoothed_aggregation<FBackend>,
+                    amgcl::mpi::relaxation::spai0<FBackend>>,
+                amgcl::mpi::solver::gmres<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            prm.solver.M = amgclDictOptions.getOrDefault<label>("M", 30);
+            Solver AMGsolve(AMGCLworld, Acl, prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(*Acl, rhss, AMGxs);
+        }
+        else if (solverType == "bicgstabl")
+        {
+            typedef amgcl::mpi::make_solver<
+                amgcl::mpi::amg<FBackend,
+                    amgcl::mpi::coarsening::smoothed_aggregation<FBackend>,
+                    amgcl::mpi::relaxation::spai0<FBackend>>,
+                amgcl::mpi::solver::bicgstabl<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            prm.solver.L = amgclDictOptions.getOrDefault<label>("L", 2);
+            Solver AMGsolve(AMGCLworld, Acl, prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(*Acl, rhss, AMGxs);
+        }
+        else  // Default: bicgstab
+        {
+            typedef amgcl::mpi::make_solver<
+                amgcl::mpi::amg<FBackend,
+                    amgcl::mpi::coarsening::smoothed_aggregation<FBackend>,
+                    amgcl::mpi::relaxation::spai0<FBackend>>,
+                amgcl::mpi::solver::bicgstab<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            if (amgclDictOptions.found("ns_search"))
+            {
+                prm.solver.ns_search = amgclDictOptions.get<bool>("ns_search");
+            }
+            Solver AMGsolve(AMGCLworld, Acl, prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(*Acl, rhss, AMGxs);
+        }
+    }
+    else
+    {
+        // Serial solver
+        // Select solver and relaxation type for serial
+        if (solverType == "cg" && relaxationType == "spai0")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
+                amgcl::solver::cg<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else if (solverType == "cg" && relaxationType == "spai1")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai1>,
+                amgcl::solver::cg<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else if (solverType == "cg" && relaxationType == "ilu0")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::ilu0>,
+                amgcl::solver::cg<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else if (solverType == "gmres" && relaxationType == "spai0")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
+                amgcl::solver::gmres<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            prm.solver.M = amgclDictOptions.getOrDefault<label>("M", 30);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else if (solverType == "gmres" && relaxationType == "ilu0")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::ilu0>,
+                amgcl::solver::gmres<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            prm.solver.M = amgclDictOptions.getOrDefault<label>("M", 30);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else if (solverType == "bicgstabl")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
+                amgcl::solver::bicgstabl<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            prm.solver.L = amgclDictOptions.getOrDefault<label>("L", 2);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else if (solverType == "fgmres")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
+                amgcl::solver::fgmres<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            prm.solver.M = amgclDictOptions.getOrDefault<label>("M", 30);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else if (solverType == "idrs")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
+                amgcl::solver::idrs<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else if (solverType == "bicgstab" && relaxationType == "spai1")
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai1>,
+                amgcl::solver::bicgstab<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+        else  // Default: bicgstab with spai0
+        {
+            typedef amgcl::make_solver<
+                amgcl::amg<DBackend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
+                amgcl::solver::bicgstab<DBackend>> Solver;
+            
+            Solver::params prm;
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
+            std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
+        }
+    }
+
     forAll(psi, pi)
     {
         psi[pi] = AMGxs[pi];
     }
 
-    // amgcl::backend::residual(rhss, *Acl, AMGxs, AMGrs);
-    // ctx.performance.finalResidual() = std::sqrt(amgcl::backend::inner_product(AMGrs, AMGrs));
-    ctx.performance.finalResidual() = AMGerror;
-
+    // Calculate final residual using OpenFOAM standard method
+    matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
+    temp = source - Apsi;
+    solveScalar finalResidual = gSumMag(temp, matrix_.mesh().comm()) / normFactor;
+    
+    ctx.performance.finalResidual() = finalResidual;
     ctx.caching.eventEnd();
     ctx.performance.nIterations() = AMGiters;
+    
+    if (lduMatrix::debug >= 2)
+    {
+        Info<< "amgclSolver: " << fieldName_
+            << ", Initial residual = " << initialResidual
+            << ", Final residual = " << finalResidual
+            << ", No Iterations " << AMGiters
+            << endl;
+    }
+    
     return ctx.performance;
 }
 
