@@ -28,6 +28,7 @@ License
 \*---------------------------------------------------------------------------*/
 
 #include <vector>
+#include <set>
 #include <amgcl/backend/builtin.hpp>
 #include <amgcl/adapter/crs_tuple.hpp>
 #include <amgcl/make_solver.hpp>
@@ -596,54 +597,29 @@ void Foam::amgclSolver::buildMat
     label n = matrix_.diag().size();
     const globalIndex global(n);
     label num_nonzero = 0;
-    List<std::vector<label>> A(n);
-    label a_row = 1;
-    label a_col = 1;
-    bool repeat = 0;
+    
+    // Use std::set for efficient duplicate checking - O(log n) instead of O(n)
+    List<std::set<label>> A(n);
 
-    for(int i=0; i<n; i++)
+    // Build diagonal entries
+    for(label i=0; i<n; i++)
     {
-        a_row = i;
-        a_col = AMGlocalStart + i;
-        repeat = 0;
-        for (int aii = 0; aii < A[a_row].size(); aii++)
-        {
-            if (A[a_row][aii]==a_col)
-            {
-                repeat = 1;
-            }
-        }
-        if (!repeat) A[a_row].push_back(a_col);
+        A[i].insert(AMGlocalStart + i);
     }
+    
+    // Build off-diagonal entries (upper and lower)
     for(label faceI=0; faceI<matrix_.lduAddr().lowerAddr().size(); faceI++)
     {
         label l = matrix_.lduAddr().lowerAddr()[faceI];
         label u = matrix_.lduAddr().upperAddr()[faceI];
 
-        a_row = l;
-        a_col = AMGlocalStart + u;
-        repeat = 0;
-        for (int aii = 0; aii < A[a_row].size(); aii++)
-        {
-            if (A[a_row][aii]==a_col)
-            {
-                repeat = 1;
-            }
-        }
-        if (!repeat) A[a_row].push_back(a_col);
-
-        a_row = u;
-        a_col = AMGlocalStart + l;
-        repeat = 0;
-        for (int aii = 0; aii < A[a_row].size(); aii++)
-        {
-            if (A[a_row][aii]==a_col)
-            {
-                repeat = 1;
-            }
-        }
-        if (!repeat) A[a_row].push_back(a_col);
+        // Lower triangular contribution
+        A[l].insert(AMGlocalStart + u);
+        
+        // Upper triangular contribution
+        A[u].insert(AMGlocalStart + l);
     }
+    
     labelList globalCells
     (
         identity
@@ -652,6 +628,7 @@ void Foam::amgclSolver::buildMat
             global.localStart()
         )
     );
+    
     // Connections to neighbouring processors
     {
         // Initialise transfer of global cells
@@ -661,18 +638,23 @@ void Foam::amgclSolver::buildMat
             {
                 interfaces[patchi].initInternalFieldTransfer
                 (
-                    Pstream::commsTypes::blocking,
+                    Pstream::commsTypes::nonBlocking,
                     globalCells
                 );
             }
         }
+        
+        // *** FIX 1: Add MPI synchronization to ensure data transfer completes ***
+        if (Pstream::parRun())
+        {
+            Pstream::waitRequests();
+        }
+        
         forAll(interfaces, patchi)
         {
             if (interfaces.set(patchi))
             {
                 const polyPatch &patch = mesh.boundaryMesh()[patchi];
-                //patch.type()
-                //processorFvPatch proPatch(patch, bMesh);
                 label nbrPro = proNeiPatch[patchi];
                 label nbrLocalStart = global.localStart(nbrPro);
                 const labelUList& faceCells = lduAddr.patchAddr(patchi);
@@ -681,69 +663,58 @@ void Foam::amgclSolver::buildMat
                 (
                     interfaces[patchi].internalFieldTransfer
                     (
-                        Pstream::commsTypes::blocking,
+                        Pstream::commsTypes::nonBlocking,
                         globalCells
                     )
                 );
 
-                const label off = global.localStart();
                 forAll(faceCells, i)
                 {
-                    a_row = faceCells[i];
-                    a_col = paraStartNum[nbrPro] + (nbrCells[i] - nbrLocalStart);
-                    repeat = 0;
-                    for (int aii = 0; aii < A[a_row].size(); aii++)
-                    {
-                        if (A[a_row][aii]==a_col)
-                        {
-                            repeat = 1;
-                        }
-                    }
-                    if (!repeat) A[a_row].push_back(a_col);
+                    label a_row = faceCells[i];
+                    label a_col = paraStartNum[nbrPro] + (nbrCells[i] - nbrLocalStart);
+                    A[a_row].insert(a_col);  // std::set automatically handles duplicates
                 }
             }
         }
     }
-    forAll(A,ai)
+    
+    // Count total non-zeros
+    forAll(A, ai)
     {
         num_nonzero += A[ai].size();
     }
-    ptrb.resize(n + 1,0);
-    colb.resize(num_nonzero,1.0);
-    valb.resize(num_nonzero,1.0);
-    rhsb.resize(n,0.0);
-    AMGxb.resize(n,0.0);
-    AMGrb.resize(n,0.0);
+    
+    // Allocate storage
+    ptrb.resize(n + 1, 0);
+    colb.resize(num_nonzero, 0);
+    valb.resize(num_nonzero, 1.0);  // Initialize to 1.0 (will be updated in updateMat)
+    rhsb.resize(n, 0.0);
+    AMGxb.resize(n, 0.0);
+    AMGrb.resize(n, 0.0);
+    
     ptrb[0] = 0;
     label numcal = 0;
+    
+    // Build CSR structure
     forAll(A, i)
     {
-        label pI[A[i].size()];
-        for (label k = 0; k < A[i].size(); k++)
+        // *** FIX 3: Use std::vector instead of VLA ***
+        std::vector<label> sortedCols(A[i].begin(), A[i].end());
+        
+        // *** FIX 2: std::set already maintains sorted order, no need to sort ***
+        // But if using std::unordered_set, uncomment the next line:
+        // std::sort(sortedCols.begin(), sortedCols.end());
+        
+        for (label m = 0; m < sortedCols.size(); m++)
         {
-            pI[k] = A[i][k];
-        }
-        for (label pi = 0; pi < A[i].size() - 1; pi++)
-        {
-            for (label pj = 0; pj < A[i].size() - pi - 1; pj++)
-            {
-                if (pI[pj] > pI[pj + 1])
-                {
-                    label temp = pI[pj + 1];
-                    pI[pj + 1] = pI[pj];
-                    pI[pj] = temp;
-                }
-            }
-        }
-        for (label m = 0; m < A[i].size(); m++)
-        {
-            
+            colb[numcal] = sortedCols[m];
+            valb[numcal] = 1.0;  // Placeholder value
             numcal++;
-            colb[numcal - 1] = pI[m];
-            valb[numcal - 1] = 1.0;
         }
         ptrb[i + 1] = numcal;
     }
+    
+    // Clear temporary storage
     forAll(A, cellI)
     {
         A[cellI].clear();
@@ -764,9 +735,6 @@ void Foam::amgclSolver::updateMat
     labelField& proNeiPatch
 ) const
 {
-
-    label AMGrow = 0, AMGcol = 0;
-    doubleScalar AMGval = 0.0;
     const lduAddressing &lduAddr = matrix_.mesh().lduAddr();
     const lduInterfacePtrsList interfaces(matrix_.mesh().interfaces());
     const label AMGlocalStart = paraStartNum[Pstream::myProcNo()];
@@ -779,54 +747,58 @@ void Foam::amgclSolver::updateMat
     const label nrows_ = lduAddr.size();
     const label nIntFaces_ = upp.size();
     const globalIndex global(nrows_);
+    
+    // *** OPTIMIZATION: Helper lambda for binary search in sorted column indices ***
+    // Columns are sorted (guaranteed by buildMat using std::set)
+    auto findColumn = [&](label row, ptrdiff_t targetCol) -> ptrdiff_t
+    {
+        ptrdiff_t start = ptru[row];
+        ptrdiff_t end = ptru[row + 1];
+        
+        // Binary search - O(log n) instead of O(n)
+        auto it = std::lower_bound(
+            colu.begin() + start,
+            colu.begin() + end,
+            targetCol
+        );
+        
+        if (it != colu.begin() + end && *it == targetCol)
+        {
+            return std::distance(colu.begin(), it);
+        }
+        
+        // Should never happen if matrix structure is correct
+        FatalErrorInFunction
+            << "Column index " << targetCol << " not found in row " << row << nl
+            << "This indicates a matrix structure mismatch." << nl
+            << exit(FatalError);
+        
+        return -1;
+    };
 
     // The diagonal
     for (label celli = 0; celli < diagVal.size(); ++celli)
     {
-        doubleScalar val = diagVal[celli];
-
-        AMGrow = celli;
-        AMGcol = AMGlocalStart + celli;
-        AMGval = val;
-        for (label ptri = ptru[AMGrow]; ptri < ptru[AMGrow + 1]; ptri++)
-        {
-            if (AMGcol == colu[ptri])
-            {
-                valu[ptri] = AMGval;
-                break;
-            }
-        }
+        ptrdiff_t idx = findColumn(celli, AMGlocalStart + celli);
+        valu[idx] = diagVal[celli];
     }
 
-    // upper and lower
-    for (label faceI = 0; faceI < matrix_.lduAddr().lowerAddr().size(); faceI++)   
+    // Upper and lower triangular entries
+    const scalarField& upperVal = matrix_.upper();
+    const scalarField& lowerVal = matrix_.lower();
+    
+    for (label faceI = 0; faceI < low.size(); faceI++)   
     {
-        label l = matrix_.lduAddr().lowerAddr()[faceI];
-        label u = matrix_.lduAddr().upperAddr()[faceI];
+        label l = low[faceI];
+        label u = upp[faceI];
         
-        AMGrow = l; 
-        AMGcol = AMGlocalStart + u; 
-        AMGval = matrix_.upper()[faceI];
-        for (label ptri = ptru[AMGrow]; ptri < ptru[AMGrow + 1]; ptri++)
-        {
-            if (AMGcol == colu[ptri])
-            {
-                valu[ptri] = AMGval;
-                break;
-            }
-        }
-
-        AMGrow = u; 
-        AMGcol = AMGlocalStart + l;
-        AMGval = matrix_.lower()[faceI];
-        for (label ptri = ptru[AMGrow]; ptri < ptru[AMGrow + 1]; ptri++)
-        {
-            if (AMGcol == colu[ptri])
-            {
-                valu[ptri] = AMGval;
-                break;
-            }
-        }
+        // Upper contribution: A[l][u]
+        ptrdiff_t idxUpper = findColumn(l, AMGlocalStart + u);
+        valu[idxUpper] = upperVal[faceI];
+        
+        // Lower contribution: A[u][l]
+        ptrdiff_t idxLower = findColumn(u, AMGlocalStart + l);
+        valu[idxLower] = lowerVal[faceI];
     }
 
     labelList globalCells
@@ -846,7 +818,7 @@ void Foam::amgclSolver::updateMat
             {
                 interfaces[patchi].initInternalFieldTransfer
                 (
-                    Pstream::commsTypes::blocking,
+                    Pstream::commsTypes::nonBlocking,
                     globalCells
                 );
             }
@@ -859,11 +831,9 @@ void Foam::amgclSolver::updateMat
 
         forAll(interfaces, patchi)
         {
-            
             if (interfaces.set(patchi))
             {
                 const polyPatch &patch = fvmu.boundaryMesh()[patchi];
-                //processorFvPatch proPatch(patch, bMesh);
                 label nbrPro = proNeiPatch[patchi];
                 label nbrLocalStart = global.localStart(nbrPro);
                 const labelUList& faceCells = lduAddr.patchAddr(patchi);
@@ -873,7 +843,7 @@ void Foam::amgclSolver::updateMat
                 (
                     interfaces[patchi].internalFieldTransfer
                     (
-                        Pstream::commsTypes::blocking, // blocking
+                        Pstream::commsTypes::nonBlocking,
                         globalCells
                     )
                 );
@@ -887,20 +857,14 @@ void Foam::amgclSolver::updateMat
                         << exit(FatalError);
                 }
 
-                const label off = global.localStart();
                 forAll(faceCells, i)
                 {
+                    label AMGrow = faceCells[i];
+                    ptrdiff_t AMGcol = paraStartNum[nbrPro] + (nbrCells[i] - nbrLocalStart);
                     doubleScalar bval = -bCoeffs[i];
-                    AMGrow = faceCells[i];
-                    AMGcol = paraStartNum[nbrPro] + (nbrCells[i] - nbrLocalStart);
-                    for (label ptri = ptru[AMGrow]; ptri < ptru[AMGrow + 1]; ptri++)
-                    {
-                        if (AMGcol == colu[ptri])
-                        {
-                            valu[ptri] = bval;
-                            break;
-                        }
-                    }
+                    
+                    ptrdiff_t idx = findColumn(AMGrow, AMGcol);
+                    valu[idx] = bval;
                 }
             }
         }

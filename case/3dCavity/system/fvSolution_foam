@@ -1,8 +1,8 @@
 /*--------------------------------*- C++ -*----------------------------------*\
 | =========                 |                                                 |
 | \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\    /   O peration     | Version:  5                                     |
-|   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|  \\    /   O peration     | Version:  2406                                  |
+|   \\  /    A nd           | Web:      www.OpenFOAM.com                      |
 |    \\/     M anipulation  |                                                 |
 \*---------------------------------------------------------------------------*/
 FoamFile
@@ -14,30 +14,21 @@ FoamFile
     object      fvSolution;
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+// OpenFOAM 原生求解器配置 - 用于性能对比
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
 solvers
 {
+    // 速度场求解器
     U
     {
-
         solver          smoothSolver;
         smoother        symGaussSeidel;
         tolerance       1e-08;
         relTol          1e-03;
-
-        // solver          GAMG;
-        // tolerance       1e-06;
-        // relTol          0.01;
-        // smoother        GaussSeidel;
-        // nPreSweeps      2;
-        // nPostSweeps     2;
-        // nFinestSweeps   2;
-        // cacheAgglomeration false;
-        // nCellsInCoarsestLevel 10;
-        // agglomerator    faceAreaPair;
-        // mergeLevels     1;
     }
 
+    // 压力校正
     pCorr
     {
         solver          GAMG;
@@ -53,6 +44,7 @@ solvers
         mergeLevels     1;
     }
 
+    // 压力校正最终迭代
     pCorrFinal
     {
         solver          PCG;
@@ -71,83 +63,28 @@ solvers
             agglomerator    faceAreaPair;
             mergeLevels     1;
         }
-
         tolerance       1e-15;
         relTol          0;
         maxIter         20;
     }
 
-    // p
-    // {
-    //     solver          GAMG;
-    //     tolerance       1e-08;
-    //     relTol          0.01;
-    //     smoother        GaussSeidel;
-    //     nPreSweeps      0;
-    //     nPostSweeps     2;
-    //     nFinestSweeps   2;
-    //     cacheAgglomeration false;
-    //     nCellsInCoarsestLevel 10;
-    //     agglomerator    faceAreaPair;
-    //     mergeLevels     1;
-    // }
+    // 压力场求解器
+    p
+    {
+        solver          GAMG;
+        tolerance       1e-08;
+        relTol          0.01;
+        smoother        GaussSeidel;
+        nPreSweeps      0;
+        nPostSweeps     2;
+        nFinestSweeps   2;
+        cacheAgglomeration false;
+        nCellsInCoarsestLevel 10;
+        agglomerator    faceAreaPair;
+        mergeLevels     1;
+    }
 
-    // p
-    // {
-    //     solver amgclMPI;
-    //     amgclMPI
-    //     {
-    //         options
-    //         {
-    //             // check_after false;
-    //             ns_search true;
-    //             maxiter 100;
-    //         }
-    //         caching
-    //         {
-    //             matrix
-    //             {
-    //                 //update always;
-    //                 update periodic;
-    //                 periodicCoeffs
-    //                 {
-    //                     frequency 3;
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     tolerance       0;
-    //     relTol          1e-6;
-    // }
-
-    // pFinal
-    // {
-    //     solver amgclMPI;
-    //     amgclMPI
-    //     {
-    //         options
-    //         {
-    //             // check_after false;
-    //             ns_search true;
-    //             maxiter 100;
-    //         }
-    //         caching
-    //         {
-    //             matrix
-    //             {
-    //                 //update always;
-    //                 update periodic;
-    //                 periodicCoeffs
-    //                 {
-    //                     frequency 1;
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     tolerance       0;
-    //     relTol          1e-15;
-    // }
-
+    // 压力最终迭代
     pFinal
     {
         solver          PCG;
@@ -166,35 +103,11 @@ solvers
             agglomerator    faceAreaPair;
             mergeLevels     1;
         }
-
         tolerance       1e-15;
         relTol          0;
         maxIter         20;
     }
 
-    // pFinal
-    // {
-    //     solver          PBiCGStab;
-    //     preconditioner
-    //     {
-    //         preconditioner  GAMG;
-    //         tolerance       1e-15;
-    //         relTol          0.01;
-    //         nVcycles        2;
-    //         smoother        GaussSeidel;
-    //         nPreSweeps      0;
-    //         nPostSweeps     2;
-    //         nFinestSweeps   2;
-    //         cacheAgglomeration false;
-    //         nCellsInCoarsestLevel 10;
-    //         agglomerator    faceAreaPair;
-    //         mergeLevels     1;
-    //     }
-
-    //     tolerance       0;
-    //     relTol          1e-15;
-    //     maxIter         100;
-    // }
 }
 
 SIMPLE
