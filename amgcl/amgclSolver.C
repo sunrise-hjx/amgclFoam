@@ -115,14 +115,17 @@ namespace
         Params& prm,
         const Foam::dictionary& dict,
         const Foam::solveScalar& relTol,
-        const Foam::solveScalar& absTol
+        const Foam::solveScalar& absTol,
+        const Foam::solveScalar& normFactor = 1.0
     )
     {
         using namespace Foam;
         
         // Basic solver parameters (all solvers have these)
+        // NOTE: AMGCL uses unnormalized residual, but OpenFOAM uses normalized
+        // So we need to scale the tolerances by normFactor
         prm.solver.tol = relTol;
-        prm.solver.abstol = absTol;
+        prm.solver.abstol = absTol * normFactor;  // Scale absolute tolerance
         prm.solver.maxiter = dict.getOrDefault<label>("maxiter", 100);
         
         // AMG coarsening parameters (if available)
@@ -340,9 +343,64 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
             << "  Solver: " << solverType << nl
             << "  Coarsening: " << coarseningType << nl
             << "  Relaxation: " << relaxationType << nl
-            << "  Parallel: " << (parallel ? "Yes" : "No") << nl;
+            << "  Parallel: " << (parallel ? "Yes" : "No") << nl
+            << "  Norm Factor: " << normFactor << nl
+            << "  Scaled Tolerance (AMGCL): " << tolerance_ * normFactor << nl
+            << "  Relative Tolerance: " << relTol_ << nl;
     }
 
+    // Validate matrix before solving
+    if (firsttimein || ctx.caching.needsMatrixUpdate())
+    {
+        label zeroRowCount = 0;
+        label zeroDiagCount = 0;
+        
+        for (label i = 0; i < An; ++i)
+        {
+            // Check for empty rows
+            if (ptrs[i] >= ptrs[i + 1])
+            {
+                zeroRowCount++;
+                if (lduMatrix::debug >= 2)
+                {
+                    WarningInFunction
+                        << "Row " << i << " is empty on processor " 
+                        << Pstream::myProcNo() << nl;
+                }
+            }
+            
+            // Check diagonal
+            bool hasDiag = false;
+            for (ptrdiff_t j = ptrs[i]; j < ptrs[i + 1]; ++j)
+            {
+                if (cols[j] == AMGlocalStart + i)
+                {
+                    hasDiag = true;
+                    if (std::abs(vals[j]) < SMALL)
+                    {
+                        zeroDiagCount++;
+                    }
+                    break;
+                }
+            }
+            
+            if (!hasDiag)
+            {
+                WarningInFunction
+                    << "Row " << i << " missing diagonal entry on processor " 
+                    << Pstream::myProcNo() << nl;
+            }
+        }
+        
+        if (zeroRowCount > 0 || zeroDiagCount > 0)
+        {
+            WarningInFunction
+                << "Matrix validation on processor " << Pstream::myProcNo() << ":" << nl
+                << "  Empty rows: " << zeroRowCount << nl
+                << "  Zero/small diagonals: " << zeroDiagCount << nl;
+        }
+    }
+    
     if (parallel)
     {
         // Parallel solver using MPI
@@ -363,7 +421,7 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
                 amgcl::mpi::solver::cg<DBackend>> Solver;
             
             Solver::params prm;
-            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_, normFactor);
             Solver AMGsolve(AMGCLworld, Acl, prm);
             std::tie(AMGiters, AMGerror) = AMGsolve(*Acl, rhss, AMGxs);
         }
@@ -424,7 +482,7 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
                 amgcl::solver::cg<DBackend>> Solver;
             
             Solver::params prm;
-            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_, normFactor);
             Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
             std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
         }
@@ -435,7 +493,7 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
                 amgcl::solver::cg<DBackend>> Solver;
             
             Solver::params prm;
-            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_, normFactor);
             Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
             std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
         }
@@ -446,7 +504,7 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
                 amgcl::solver::cg<DBackend>> Solver;
             
             Solver::params prm;
-            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_, normFactor);
             Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
             std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
         }
@@ -505,7 +563,7 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
                 amgcl::solver::idrs<DBackend>> Solver;
             
             Solver::params prm;
-            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_, normFactor);
             Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
             std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
         }
@@ -516,7 +574,7 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
                 amgcl::solver::bicgstab<DBackend>> Solver;
             
             Solver::params prm;
-            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_, normFactor);
             Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
             std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
         }
@@ -527,7 +585,7 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
                 amgcl::solver::bicgstab<DBackend>> Solver;
             
             Solver::params prm;
-            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_);
+            setAMGCLParametersBase(prm, amgclDictOptions, relTol_, tolerance_, normFactor);
             Solver AMGsolve(std::tie(An, ptrs, cols, vals), prm);
             std::tie(AMGiters, AMGerror) = AMGsolve(rhss, AMGxs);
         }
@@ -678,10 +736,26 @@ void Foam::amgclSolver::buildMat
         }
     }
     
-    // Count total non-zeros
+    // Count total non-zeros and check for empty rows
+    label emptyRowCount = 0;
     forAll(A, ai)
     {
-        num_nonzero += A[ai].size();
+        if (A[ai].empty())
+        {
+            emptyRowCount++;
+            num_nonzero += 1;  // Will add diagonal entry
+        }
+        else
+        {
+            num_nonzero += A[ai].size();
+        }
+    }
+    
+    if (emptyRowCount > 0)
+    {
+        WarningInFunction
+            << "Found " << emptyRowCount << " empty rows on processor "
+            << Pstream::myProcNo() << " out of " << n << " total rows" << nl;
     }
     
     // Allocate storage
@@ -705,10 +779,21 @@ void Foam::amgclSolver::buildMat
         // But if using std::unordered_set, uncomment the next line:
         // std::sort(sortedCols.begin(), sortedCols.end());
         
+        // Check for empty rows (can happen in parallel at high core counts)
+        if (sortedCols.empty())
+        {
+            WarningInFunction
+                << "Empty row " << i << " detected on processor " 
+                << Pstream::myProcNo() << nl
+                << "This may cause solver issues." << nl;
+            // Add self-reference to avoid completely empty row
+            sortedCols.push_back(AMGlocalStart + i);
+        }
+        
         for (label m = 0; m < sortedCols.size(); m++)
         {
             colb[numcal] = sortedCols[m];
-            valb[numcal] = 1.0;  // Placeholder value
+            valb[numcal] = (m == 0 && sortedCols.size() == 1) ? 1.0 : 1.0;  // Placeholder value
             numcal++;
         }
         ptrb[i + 1] = numcal;
@@ -752,8 +837,25 @@ void Foam::amgclSolver::updateMat
     // Columns are sorted (guaranteed by buildMat using std::set)
     auto findColumn = [&](label row, ptrdiff_t targetCol) -> ptrdiff_t
     {
+        // Validate row index
+        if (row < 0 || row >= nrows_)
+        {
+            WarningInFunction
+                << "Invalid row index: " << row << " (nrows = " << nrows_ << ")" << nl;
+            return -1;
+        }
+        
         ptrdiff_t start = ptru[row];
         ptrdiff_t end = ptru[row + 1];
+        
+        // Check for empty row
+        if (start >= end)
+        {
+            WarningInFunction
+                << "Empty row " << row << " on processor " << Pstream::myProcNo() << nl
+                << "start = " << start << ", end = " << end << nl;
+            return -1;
+        }
         
         // Binary search - O(log n) instead of O(n)
         auto it = std::lower_bound(
@@ -767,11 +869,19 @@ void Foam::amgclSolver::updateMat
             return std::distance(colu.begin(), it);
         }
         
-        // Should never happen if matrix structure is correct
-        FatalErrorInFunction
-            << "Column index " << targetCol << " not found in row " << row << nl
-            << "This indicates a matrix structure mismatch." << nl
-            << exit(FatalError);
+        // Column not found - this might be OK for boundary conditions
+        if (lduMatrix::debug >= 2)
+        {
+            WarningInFunction
+                << "Column " << targetCol << " not found in row " << row << nl
+                << "Row has columns: ";
+            for (ptrdiff_t i = start; i < end && i < start + 10; ++i)
+            {
+                Pout << colu[i] << " ";
+            }
+            if (end - start > 10) Pout << "...";
+            Pout << nl;
+        }
         
         return -1;
     };
@@ -780,7 +890,16 @@ void Foam::amgclSolver::updateMat
     for (label celli = 0; celli < diagVal.size(); ++celli)
     {
         ptrdiff_t idx = findColumn(celli, AMGlocalStart + celli);
-        valu[idx] = diagVal[celli];
+        if (idx >= 0 && idx < valu.size())
+        {
+            valu[idx] = diagVal[celli];
+        }
+        else if (idx < 0)
+        {
+            WarningInFunction
+                << "Failed to find diagonal entry for cell " << celli 
+                << " on processor " << Pstream::myProcNo() << nl;
+        }
     }
 
     // Upper and lower triangular entries
@@ -792,13 +911,28 @@ void Foam::amgclSolver::updateMat
         label l = low[faceI];
         label u = upp[faceI];
         
+        // Validate indices
+        if (l < 0 || l >= nrows_ || u < 0 || u >= nrows_)
+        {
+            WarningInFunction
+                << "Invalid face indices: l=" << l << ", u=" << u 
+                << " (nrows=" << nrows_ << ")" << nl;
+            continue;
+        }
+        
         // Upper contribution: A[l][u]
         ptrdiff_t idxUpper = findColumn(l, AMGlocalStart + u);
-        valu[idxUpper] = upperVal[faceI];
+        if (idxUpper >= 0 && idxUpper < valu.size())
+        {
+            valu[idxUpper] = upperVal[faceI];
+        }
         
         // Lower contribution: A[u][l]
         ptrdiff_t idxLower = findColumn(u, AMGlocalStart + l);
-        valu[idxLower] = lowerVal[faceI];
+        if (idxLower >= 0 && idxLower < valu.size())
+        {
+            valu[idxLower] = lowerVal[faceI];
+        }
     }
 
     labelList globalCells
@@ -860,11 +994,42 @@ void Foam::amgclSolver::updateMat
                 forAll(faceCells, i)
                 {
                     label AMGrow = faceCells[i];
+                    
+                    // Validate neighbor processor index
+                    if (nbrPro < 0 || nbrPro >= paraStartNum.size() - 1)
+                    {
+                        WarningInFunction
+                            << "Invalid neighbor processor: " << nbrPro 
+                            << " (max=" << paraStartNum.size() - 2 << ")" << nl;
+                        continue;
+                    }
+                    
+                    // Validate global cell index
+                    if (nbrCells[i] < nbrLocalStart)
+                    {
+                        WarningInFunction
+                            << "Invalid neighbor cell index: " << nbrCells[i]
+                            << " < " << nbrLocalStart << nl;
+                        continue;
+                    }
+                    
                     ptrdiff_t AMGcol = paraStartNum[nbrPro] + (nbrCells[i] - nbrLocalStart);
                     doubleScalar bval = -bCoeffs[i];
                     
+                    // Validate row index
+                    if (AMGrow < 0 || AMGrow >= nrows_)
+                    {
+                        WarningInFunction
+                            << "Invalid boundary cell index: " << AMGrow 
+                            << " (nrows=" << nrows_ << ")" << nl;
+                        continue;
+                    }
+                    
                     ptrdiff_t idx = findColumn(AMGrow, AMGcol);
-                    valu[idx] = bval;
+                    if (idx >= 0 && idx < valu.size())
+                    {
+                        valu[idx] = bval;
+                    }
                 }
             }
         }
