@@ -826,6 +826,8 @@ void Foam::amgclSolver::updateMat
     const labelUList& upp = lduAddr.upperAddr();
     const labelUList& low = lduAddr.lowerAddr();
     const scalarField& diagVal = matrix_.diag();
+    const scalarField& upperVal = matrix_.upper();
+    const scalarField& lowerVal = matrix_.lower();
     const fvBoundaryMesh bMesh(fvmu);
 
     // Local degrees-of-freedom i.e. number of local rows
@@ -886,7 +888,39 @@ void Foam::amgclSolver::updateMat
         return -1;
     };
 
-    // The diagonal
+    // ============================================================================
+    // *** PARALLEL OPTIMIZATION: Overlap computation with communication ***
+    // Step 1: Initiate non-blocking MPI communication for boundary data
+    // ============================================================================
+    
+    labelList globalCells
+    (
+        identity
+        (
+            global.localSize(),
+            global.localStart()
+        )
+    );
+    
+    // Start non-blocking communication early
+    forAll(interfaces, patchi)
+    {
+        if (interfaces.set(patchi))
+        {
+            interfaces[patchi].initInternalFieldTransfer
+            (
+                Pstream::commsTypes::nonBlocking,
+                globalCells
+            );
+        }
+    }
+    
+    // ============================================================================
+    // Step 2: Perform LOCAL computations while MPI communication is in progress
+    // These operations do NOT depend on data from neighboring processors
+    // ============================================================================
+    
+    // Update diagonal entries (purely local operation)
     for (label celli = 0; celli < diagVal.size(); ++celli)
     {
         ptrdiff_t idx = findColumn(celli, AMGlocalStart + celli);
@@ -902,10 +936,7 @@ void Foam::amgclSolver::updateMat
         }
     }
 
-    // Upper and lower triangular entries
-    const scalarField& upperVal = matrix_.upper();
-    const scalarField& lowerVal = matrix_.lower();
-    
+    // Update upper and lower triangular entries (purely local operation)
     for (label faceI = 0; faceI < low.size(); faceI++)   
     {
         label l = low[faceI];
@@ -934,102 +965,87 @@ void Foam::amgclSolver::updateMat
             valu[idxLower] = lowerVal[faceI];
         }
     }
-
-    labelList globalCells
-    (
-        identity
-        (
-            global.localSize(),
-            global.localStart()
-        )
-    );
-
-    // Connections to neighbouring processors
+    
+    // ============================================================================
+    // Step 3: Wait for MPI communication to complete before processing boundaries
+    // ============================================================================
+    
+    if (Pstream::parRun())
     {
-        forAll(interfaces, patchi)
+        Pstream::waitRequests();
+    }
+    
+    // ============================================================================
+    // Step 4: Process boundary/interface data from neighboring processors
+    // This MUST happen after communication completes
+    // ============================================================================
+    
+    forAll(interfaces, patchi)
+    {
+        if (interfaces.set(patchi))
         {
-            if (interfaces.set(patchi))
-            {
-                interfaces[patchi].initInternalFieldTransfer
+            const polyPatch &patch = fvmu.boundaryMesh()[patchi];
+            label nbrPro = proNeiPatch[patchi];
+            label nbrLocalStart = global.localStart(nbrPro);
+            const labelUList& faceCells = lduAddr.patchAddr(patchi);
+            const scalarField& bCoeffs = interfaceBouCoeffs_[patchi];
+
+            labelField nbrCells
+            (
+                interfaces[patchi].internalFieldTransfer
                 (
                     Pstream::commsTypes::nonBlocking,
                     globalCells
-                );
-            }
-        }
+                )
+            );
 
-        if (Pstream::parRun())
-        {
-            Pstream::waitRequests();
-        }
-
-        forAll(interfaces, patchi)
-        {
-            if (interfaces.set(patchi))
+            if (faceCells.size() != nbrCells.size())
             {
-                const polyPatch &patch = fvmu.boundaryMesh()[patchi];
-                label nbrPro = proNeiPatch[patchi];
-                label nbrLocalStart = global.localStart(nbrPro);
-                const labelUList& faceCells = lduAddr.patchAddr(patchi);
-                const scalarField& bCoeffs = interfaceBouCoeffs_[patchi];
+                FatalErrorInFunction
+                    << "Mismatch in interface sizes (AMI?)" << nl
+                    << "Have " << faceCells.size() << " != "
+                    << nbrCells.size() << nl
+                    << exit(FatalError);
+            }
 
-                labelField nbrCells
-                (
-                    interfaces[patchi].internalFieldTransfer
-                    (
-                        Pstream::commsTypes::nonBlocking,
-                        globalCells
-                    )
-                );
-
-                if (faceCells.size() != nbrCells.size())
+            forAll(faceCells, i)
+            {
+                label AMGrow = faceCells[i];
+                
+                // Validate neighbor processor index
+                if (nbrPro < 0 || nbrPro >= paraStartNum.size() - 1)
                 {
-                    FatalErrorInFunction
-                        << "Mismatch in interface sizes (AMI?)" << nl
-                        << "Have " << faceCells.size() << " != "
-                        << nbrCells.size() << nl
-                        << exit(FatalError);
+                    WarningInFunction
+                        << "Invalid neighbor processor: " << nbrPro 
+                        << " (max=" << paraStartNum.size() - 2 << ")" << nl;
+                    continue;
                 }
-
-                forAll(faceCells, i)
+                
+                // Validate global cell index
+                if (nbrCells[i] < nbrLocalStart)
                 {
-                    label AMGrow = faceCells[i];
-                    
-                    // Validate neighbor processor index
-                    if (nbrPro < 0 || nbrPro >= paraStartNum.size() - 1)
-                    {
-                        WarningInFunction
-                            << "Invalid neighbor processor: " << nbrPro 
-                            << " (max=" << paraStartNum.size() - 2 << ")" << nl;
-                        continue;
-                    }
-                    
-                    // Validate global cell index
-                    if (nbrCells[i] < nbrLocalStart)
-                    {
-                        WarningInFunction
-                            << "Invalid neighbor cell index: " << nbrCells[i]
-                            << " < " << nbrLocalStart << nl;
-                        continue;
-                    }
-                    
-                    ptrdiff_t AMGcol = paraStartNum[nbrPro] + (nbrCells[i] - nbrLocalStart);
-                    doubleScalar bval = -bCoeffs[i];
-                    
-                    // Validate row index
-                    if (AMGrow < 0 || AMGrow >= nrows_)
-                    {
-                        WarningInFunction
-                            << "Invalid boundary cell index: " << AMGrow 
-                            << " (nrows=" << nrows_ << ")" << nl;
-                        continue;
-                    }
-                    
-                    ptrdiff_t idx = findColumn(AMGrow, AMGcol);
-                    if (idx >= 0 && idx < valu.size())
-                    {
-                        valu[idx] = bval;
-                    }
+                    WarningInFunction
+                        << "Invalid neighbor cell index: " << nbrCells[i]
+                        << " < " << nbrLocalStart << nl;
+                    continue;
+                }
+                
+                ptrdiff_t AMGcol = paraStartNum[nbrPro] + (nbrCells[i] - nbrLocalStart);
+                doubleScalar bval = -bCoeffs[i];
+                
+                // Validate row index
+                if (AMGrow < 0 || AMGrow >= nrows_)
+                {
+                    WarningInFunction
+                        << "Invalid boundary cell index: " << AMGrow 
+                        << " (nrows=" << nrows_ << ")" << nl;
+                    continue;
+                }
+                
+                ptrdiff_t idx = findColumn(AMGrow, AMGcol);
+                if (idx >= 0 && idx < valu.size())
+                {
+                    valu[idx] = bval;
                 }
             }
         }
