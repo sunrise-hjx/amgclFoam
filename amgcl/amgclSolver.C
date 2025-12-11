@@ -317,15 +317,18 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
 
     // Calculate initial residual using OpenFOAM standard method
     solveScalarField Apsi(psi.size());
+    solveScalarField res(psi.size());
     solveScalarField temp(psi.size());
     
     matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
-    temp = source - Apsi;
+    res = source - Apsi;
     
-    solveScalar normFactor = this->normFactor(psi, source, Apsi, temp);
+    // solveScalar normFactor = this->normFactor(psi, source, Apsi, temp);
+    solveScalar normFactor = Foam::sqrt(gSumSqr(source, matrix_.mesh().comm())) + solverPerformance::small_;
     ctx.normFactor = normFactor;
     
-    solveScalar initialResidual = gSumMag(temp, matrix_.mesh().comm()) / normFactor;
+    // solveScalar initialResidual = gSumMag(temp, matrix_.mesh().comm()) / normFactor;
+    solveScalar initialResidual = Foam::sqrt(gSumSqr(res, matrix_.mesh().comm())) / normFactor ; 
     
     size_t AMGiters;
     doubleScalar &AMGerror = ctx.error;
@@ -598,8 +601,10 @@ Foam::solverPerformance Foam::amgclSolver::scalarSolve
 
     // Calculate final residual using OpenFOAM standard method
     matrix_.Amul(Apsi, psi, interfaceBouCoeffs_, interfaces_, cmpt);
-    temp = source - Apsi;
-    solveScalar finalResidual = gSumMag(temp, matrix_.mesh().comm()) / normFactor;
+    res = source - Apsi;
+    // solveScalar finalResidual = gSumMag(temp, matrix_.mesh().comm()) / normFactor;
+    solveScalar finalResidual = Foam::sqrt(gSumSqr(res, matrix_.mesh().comm())) / normFactor;
+    
     
     ctx.performance.finalResidual() = finalResidual;
     ctx.caching.eventEnd();
